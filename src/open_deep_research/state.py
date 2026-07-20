@@ -1,131 +1,110 @@
-"""Graph state definitions and data structures for the Deep Research Swarm."""
+"""Graph state definitions aligned with deep_researcher.py and Master Doc."""
 import operator
-from typing import Annotated, Optional, Any
+from typing import Annotated, Optional, Any, List
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
 from langchain_core.messages import MessageLikeRepresentation
 from langgraph.graph.message import add_messages
 
 ###################
-# 1. The Knowledge Graph Node
+# 1. The Knowledge Graph Node (Sector 3 & 4)
 ###################
 class EvidenceNode(BaseModel):
     """Represents a verified source in the evidence graph."""
-    doc_id: str = Field(description="Unique hash of the URL to prevent duplicates")
-    url: str
-    title: str
-    snippet: str
-    citation_index: int = Field(description="Global citation index e.g., 1 for [1]")
+    doc_id: str = Field(default="")
+    url: str = Field(default="")
+    title: str = Field(default="")
+    snippet: str = Field(default="")
+    # SECTOR 4: Epistemic Verification Fields
+    claim: str = Field(default="", description="Core factual claim for CMI satiation checks")
+    date_published: Optional[str] = Field(default=None, description="YYYY-MM-DD for temporal grounding")
+    citation_index: int = Field(default=0)
+
+class EvidenceGraphExtraction(BaseModel):
+    """Structured output for compressing research into an Evidence Graph."""
+    nodes: List[EvidenceNode] = Field(default_factory=list)
 
 ###################
-# 2. Structured Outputs (Enforcing Grounding)
+# 2. Structured Outputs
 ###################
 class ConductResearch(BaseModel):
-    """Call this tool to spawn a researcher for a specific topic."""
-    research_topic: str = Field(
-        description="Highly detailed topic description. Include specific entities, timeframes, and questions to answer.",
-    )
+    research_topic: str = Field(description="The topic to research.")
 
 class ResearchComplete(BaseModel):
-    """Call this tool to indicate that the research is complete."""
-    is_complete: bool = Field(description="True if all knowledge gaps are filled.")
-    final_reasoning: str = Field(description="Brief explanation of why the gathered data is sufficient.")
-
-class Summary(BaseModel):
-    """Research summary with strict citation enforcement."""
-    summary: str = Field(description="Detailed summary. MUST use <cit>X</cit> tags to cite sources.")
-    key_excerpts: list[str] = Field(description="Key quotes or data points with <cit>X</cit> tags.")
-    citation_indices: list[int] = Field(description="List of integer citation indices used in this summary.")
+    pass
 
 class ClarifyWithUser(BaseModel):
-    """Model for user clarification requests."""
     need_clarification: bool
-    question: str = Field(description="A targeted question to clarify the report scope.")
-    verification: str = Field(description="Message confirming we will start research after clarification.")
+    question: str
+    verification: str
 
 class ResearchQuestion(BaseModel):
-    """Initial research strategy."""
-    research_brief: str = Field(description="The core strategy and research question.")
-    initial_gaps: list[str] = Field(description="Potential missing info or edge cases to look out for.")
-
-class IdentifyGaps(BaseModel):
-    """Supervisor uses this to perform autonomous gap analysis."""
-    covered_topics: list[str] = Field(description="What we have successfully learned.")
-    missing_gaps: list[str] = Field(description="What is still missing, contradictory, or unclear.")
-    next_action: str = Field(description="Either 'research_more' or 'synthesize_report'", enum=["research_more", "synthesize_report"])
+    research_brief: str
 
 ###################
-# 3. Advanced Reducers (The Engine)
+# 3. Advanced Reducers
 ###################
+def override_reducer(current_value, new_value):
+    """Reducer function that allows overriding values in state."""
+    if current_value is None: current_value = []
+    if isinstance(new_value, dict) and new_value.get("type") == "override":
+        return new_value.get("value", new_value)
+    else:
+        return operator.add(current_value, new_value)
+
 def safe_add(current: Any, new: Any) -> list:
-    """Safely appends lists, handling None initialization."""
-    if current is None:
-        current = []
+    if current is None: current = []
     return operator.add(current, new if isinstance(new, list) else [new])
 
 def evidence_graph_reducer(current: Any, new: Any) -> list[EvidenceNode]:
     """Auto-deduplicates sources and assigns global citation indexes."""
-    if current is None:
-        current = []
-        
-    existing_ids = {node.doc_id for node in current}
+    if current is None: current = []
+    existing_ids = {node.doc_id for node in current if getattr(node, 'doc_id', None)}
     new_nodes = new if isinstance(new, list) else [new]
-    
-    # Auto-assign citation index based on current graph size
     next_citation = len(current) + 1
-    
     for node in new_nodes:
-        if node.doc_id not in existing_ids:
+        doc_id = getattr(node, 'doc_id', None)
+        if doc_id and doc_id not in existing_ids:
             node.citation_index = next_citation
             current.append(node)
-            existing_ids.add(node.doc_id)
+            existing_ids.add(doc_id)
             next_citation += 1
-            
+        elif not doc_id:
+            current.append(node)
     return current
 
 ###################
-# 4. State Definitions (Pure TypedDicts for Flawless Routing)
+# 4. State Definitions
 ###################
 class AgentInputState(TypedDict):
-    """Entry point state."""
     messages: Annotated[list[MessageLikeRepresentation], add_messages]
 
 class AgentState(TypedDict):
-    """Main global state. Kept on a strict data diet to prevent context overflow."""
     messages: Annotated[list[MessageLikeRepresentation], add_messages]
-    research_brief: str
-    
-    # Lightweight compressed data only (no heavy raw_notes here!)
-    compressed_research: Annotated[list[str], safe_add]
-    
-    # The auto-deduplicating knowledge graph
+    research_brief: Optional[str]
+    supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
+    raw_notes: Annotated[list[str], override_reducer]
+    notes: Annotated[list[str], override_reducer]
     evidence_graph: Annotated[list[EvidenceNode], evidence_graph_reducer]
-    
-    # Autonomous tracking
-    research_log: Annotated[list[str], safe_add] 
-    knowledge_gaps: Annotated[list[str], safe_add]
-    
     final_report: str
 
 class SupervisorState(TypedDict):
-    """State for the orchestrator."""
-    messages: Annotated[list[MessageLikeRepresentation], add_messages]
+    supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
     research_brief: str
-    research_log: Annotated[list[str], safe_add]
-    knowledge_gaps: Annotated[list[str], safe_add]
-    evidence_graph: Annotated[list[EvidenceNode], evidence_graph_reducer]
+    notes: Annotated[list[str], override_reducer]
     research_iterations: int
+    raw_notes: Annotated[list[str], override_reducer]
+    evidence_graph: Annotated[list[EvidenceNode], evidence_graph_reducer]
 
 class ResearcherState(TypedDict):
-    """State for individual parallel researchers."""
-    messages: Annotated[list[MessageLikeRepresentation], add_messages]
-    research_topic: str
+    researcher_messages: Annotated[list[MessageLikeRepresentation], safe_add]
     tool_call_iterations: int
+    research_topic: str
     compressed_research: str
+    raw_notes: Annotated[list[str], override_reducer]
     evidence_graph: Annotated[list[EvidenceNode], evidence_graph_reducer]
 
 class ResearcherOutputState(TypedDict):
-    """Output mapping back to the main graph."""
-    compressed_research: list[str]
+    compressed_research: str
+    raw_notes: list[str]
     evidence_graph: list[EvidenceNode]
-    messages: list[MessageLikeRepresentation]
