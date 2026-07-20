@@ -1,3 +1,4 @@
+import re
 """Utility functions and helpers for the Deep Research agent."""
 
 import asyncio
@@ -10,6 +11,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional
 import aiohttp
 import httpx
 from duckduckgo_search import DDGS
+from crawl4ai import AsyncWebCrawler
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -34,7 +36,6 @@ from tavily import AsyncTavilyClient
 from open_deep_research.configuration import Configuration, SearchAPI
 from open_deep_research.prompts import summarize_webpage_prompt
 from open_deep_research.state import ResearchComplete, Summary
-
 ##########################
 # SearXNG & DuckDuckGo Free Search Utils
 ##########################
@@ -78,35 +79,82 @@ async def searxng_search(
     max_results: Annotated[int, InjectedToolArg] = 5,
     config: RunnableConfig = None
 ) -> str:
-    """Fetch and format search results from SearXNG with DuckDuckGo fallback."""
+    """Deep Search: Fetch URLs via SearXNG, Crawl full text with Crawl4AI, and Summarize."""
     configurable = Configuration.from_runnable_config(config)
     base_url = configurable.searxng_base_url
     
+    # 1. Get Search Results (Snippets + URLs)
     all_results = {}
     for q in queries:
         results = await _fetch_searxng(q, base_url)
         if not results:
             results = await _fetch_ddg_fallback(q)
-            
         for res in results:
             url = res.get("url")
             if url and url not in all_results:
                 all_results[url] = {
                     "title": res.get("title", "No Title"),
-                    "content": res.get("content", "")
+                    "snippet": res.get("content", ""),
+                    "query": q
                 }
 
     if not all_results:
-        return "No valid search results found. Please try different search queries."
-        
-    formatted_output = "Search results: \n\n"
-    for i, (url, result) in enumerate(list(all_results.items())[:max_results * len(queries)]):
-        formatted_output += f"\n\n--- SOURCE {i+1}: {result['title']} ---\n"
-        formatted_output += f"URL: {url}\n\n"
-        formatted_output += f"SUMMARY:\n{result['content']}\n\n"
-        formatted_output += "\n\n" + "-" * 80 + "\n"
+        return "No valid search results found."
+
+    # 2. Deep Extract: Crawl the URLs to get full Markdown content
+    urls_to_crawl = list(all_results.keys())[:max_results * len(queries)]
+    crawled_content = await _crawl_urls(urls_to_crawl)
+
+    # 3. Summarize: Use LLM to summarize the full crawled content (or fallback to snippet)
+    max_char_to_include = configurable.max_content_length
+    model_api_key = get_api_key_for_model(configurable.summarization_model, config)
+    summarization_model = init_chat_model(
+        model=configurable.summarization_model,
+        max_tokens=configurable.summarization_model_max_tokens,
+        api_key=model_api_key,
+        tags=["langsmith:nostream"]
+    ).with_structured_output(Summary).with_retry(
+        stop_after_attempt=configurable.max_structured_output_retries
+    )
+
+    async def noop(): return None
+    
+    summarization_tasks = []
+    for url, data in all_results.items():
+        # Use full crawled markdown if available, otherwise use snippet
+        content = crawled_content.get(url, data.get("snippet", ""))
+        if not content:
+            summarization_tasks.append(noop())
+        else:
+            summarization_tasks.append(summarize_webpage(summarization_model, content[:max_char_to_include]))
+
+    summaries = await asyncio.gather(*summarization_tasks)
+
+    # 4. Format Output (Parity with Tavily)
+    formatted_output = "Search results: 
+
+"
+    for i, ((url, data), summary) in enumerate(zip(all_results.items(), summaries)):
+        formatted_output += f"
+
+--- SOURCE {i+1}: {data['title']} ---
+"
+        formatted_output += f"URL: {url}
+
+"
+        # Use summary if successful, otherwise use raw snippet/content
+        final_content = summary if summary else data.get("snippet", "No content available.")
+        formatted_output += f"SUMMARY:
+{final_content}
+
+"
+        formatted_output += "
+
+" + "-" * 80 + "
+"
         
     return formatted_output
+
 ##########################
 # Tavily Search Tool Utils
 ##########################
@@ -632,7 +680,14 @@ async def get_search_tool(search_api: SearchAPI):
             "name": "web_search"
         }
         return [search_tool]
-        
+    elif search_api == SearchAPI.SEARXNG:
+        search_tool = searxng_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}), 
+            "type": "search", 
+            "name": "web_search"
+        }
+        return [search_tool]
     elif search_api == SearchAPI.NONE:
         # No search functionality configured
         return []
@@ -997,3 +1052,74 @@ def get_tavily_api_key(config: RunnableConfig):
         return api_keys.get("TAVILY_API_KEY")
     else:
         return os.getenv("TAVILY_API_KEY")
+
+
+##########################
+# Epistemic Verification & Halting Utils
+##########################
+def check_information_satiation(new_claims: list[str], existing_claims: list[str], threshold: float = 0.75) -> bool:
+    """
+    Calculates Information Satiation (approximating Conditional Mutual Information).
+    Returns True if the new claims are highly redundant compared to existing claims,
+    meaning the agent has gathered enough data and should programmatically halt.
+    """
+    if not existing_claims or not new_claims:
+        return False
+        
+    def get_core_words(text: str) -> set:
+        # Extract words with 4+ characters to ignore noise (the, and, is, etc.)
+        return set(re.findall(r'\b\w{4,}\b', text.lower()))
+        
+    existing_word_pool = set()
+    for claim in existing_claims:
+        existing_word_pool.update(get_core_words(claim))
+        
+    if not existing_word_pool:
+        return False
+        
+    redundant_claims = 0
+    for new_claim in new_claims:
+        new_words = get_core_words(new_claim)
+        if not new_words:
+            continue
+        # Calculate what % of this new claim's core concepts are already known
+        overlap = len(new_words.intersection(existing_word_pool)) / len(new_words)
+        if overlap >= 0.60: # If 60% of the claim's concepts are already known, it's redundant
+            redundant_claims += 1
+            
+    # If the ratio of redundant claims exceeds the threshold, we are saturated
+    satiation_ratio = redundant_claims / len(new_claims)
+    return satiation_ratio >= threshold
+
+
+##########################
+# Epistemic Verification & Temporal Grounding
+##########################
+def filter_and_verify_evidence(evidence_graph: list) -> list:
+    """
+    Programmatic Epistemic Verification:
+    1. Deduplicates identical or highly similar claims.
+    2. Resolves temporal conflicts (newer data automatically invalidates older data).
+    """
+    if not evidence_graph:
+        return []
+        
+    unique_claims = {}
+    for node in evidence_graph:
+        # Create a fingerprint of the core concepts in the claim to catch slight rewordings
+        claim_key = "".join(sorted(re.findall(r'\b\w{4,}\b', node.claim.lower())))
+        
+        if not claim_key:
+            continue
+            
+        if claim_key not in unique_claims:
+            unique_claims[claim_key] = node
+        else:
+            # Temporal Grounding: If both have dates, keep the newer one
+            existing_date = unique_claims[claim_key].date_published
+            new_date = node.date_published
+            if existing_date and new_date:
+                if str(new_date) > str(existing_date):
+                    unique_claims[claim_key] = node # Newer data invalidates older data
+                        
+    return list(unique_claims.values())
