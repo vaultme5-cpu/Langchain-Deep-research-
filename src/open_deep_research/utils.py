@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
 import aiohttp
+import httpx
+from duckduckgo_search import DDGS
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -33,6 +35,78 @@ from open_deep_research.configuration import Configuration, SearchAPI
 from open_deep_research.prompts import summarize_webpage_prompt
 from open_deep_research.state import ResearchComplete, Summary
 
+##########################
+# SearXNG & DuckDuckGo Free Search Utils
+##########################
+SEARXNG_SEARCH_DESCRIPTION = (
+    "A free meta-search engine that aggregates results. "
+    "Useful for comprehensive, rate-limit-free web research."
+)
+
+_searxng_semaphore = asyncio.Semaphore(4)
+
+async def _fetch_searxng(query: str, base_url: str) -> list:
+    async with _searxng_semaphore:
+        params = {"q": query, "format": "json"}
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            try:
+                response = await client.get(f"{base_url}/search", params=params)
+                response.raise_for_status()
+                return response.json().get("results", [])
+            except Exception as e:
+                logging.warning(f"SearXNG fetch failed: {e}")
+                return []
+
+async def _fetch_ddg_fallback(query: str) -> list:
+    try:
+        with DDGS() as ddgs:
+            results = []
+            for r in ddgs.text(query, max_results=5):
+                results.append({
+                    "title": r.get("title", ""),
+                    "url": r.get("href", ""),
+                    "content": r.get("body", "")
+                })
+            return results
+    except Exception as e:
+        logging.warning(f"DDG fallback failed: {e}")
+        return []
+
+@tool(description=SEARXNG_SEARCH_DESCRIPTION)
+async def searxng_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    config: RunnableConfig = None
+) -> str:
+    """Fetch and format search results from SearXNG with DuckDuckGo fallback."""
+    configurable = Configuration.from_runnable_config(config)
+    base_url = configurable.searxng_base_url
+    
+    all_results = {}
+    for q in queries:
+        results = await _fetch_searxng(q, base_url)
+        if not results:
+            results = await _fetch_ddg_fallback(q)
+            
+        for res in results:
+            url = res.get("url")
+            if url and url not in all_results:
+                all_results[url] = {
+                    "title": res.get("title", "No Title"),
+                    "content": res.get("content", "")
+                }
+
+    if not all_results:
+        return "No valid search results found. Please try different search queries."
+        
+    formatted_output = "Search results: \n\n"
+    for i, (url, result) in enumerate(list(all_results.items())[:max_results * len(queries)]):
+        formatted_output += f"\n\n--- SOURCE {i+1}: {result['title']} ---\n"
+        formatted_output += f"URL: {url}\n\n"
+        formatted_output += f"SUMMARY:\n{result['content']}\n\n"
+        formatted_output += "\n\n" + "-" * 80 + "\n"
+        
+    return formatted_output
 ##########################
 # Tavily Search Tool Utils
 ##########################
