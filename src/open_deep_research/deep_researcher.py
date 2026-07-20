@@ -33,6 +33,7 @@ from open_deep_research.state import (
     AgentState,
     ClarifyWithUser,
     ConductResearch,
+    EvidenceGraphExtraction,
     ResearchComplete,
     ResearcherOutputState,
     ResearcherState,
@@ -40,6 +41,7 @@ from open_deep_research.state import (
     SupervisorState,
 )
 from open_deep_research.utils import (
+    check_information_satiation,
     anthropic_websearch_called,
     get_all_tools,
     get_api_key_for_model,
@@ -488,6 +490,20 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
         for observation, tool_call in zip(observations, tool_calls)
     ]
     
+    
+    # --- SECTOR 4: Epistemic Halting (Information Satiation) ---
+    # Check if the new search results are mathematically redundant compared to history
+    new_claims = [obs for obs in observations if isinstance(obs, str)]
+    existing_context = [m.content for m in researcher_messages if hasattr(m, 'content') and isinstance(m.content, str)]
+    
+    if check_information_satiation(new_claims, existing_context):
+        logging.info("Information Satiation reached: New data is redundant. Halting search.")
+        return Command(
+            goto="compress_research",
+            update={"researcher_messages": tool_outputs}
+        )
+    # -----------------------------------------------------------
+
     # Step 3: Check late exit conditions (after processing tools)
     exceeded_iterations = state.get("tool_call_iterations", 0) >= configurable.max_react_tool_calls
     research_complete_called = any(
@@ -509,19 +525,7 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
     )
 
 async def compress_research(state: ResearcherState, config: RunnableConfig):
-    """Compress and synthesize research findings into a concise, structured summary.
-    
-    This function takes all the research findings, tool outputs, and AI messages from
-    a researcher's work and distills them into a clean, comprehensive summary while
-    preserving all important information and findings.
-    
-    Args:
-        state: Current researcher state with accumulated research messages
-        config: Runtime configuration with compression model settings
-        
-    Returns:
-        Dictionary containing compressed research summary and raw notes
-    """
+    """Compress and synthesize research findings into an Evidence Graph and readable summary."""
     # Step 1: Configure the compression model
     configurable = Configuration.from_runnable_config(config)
     synthesizer_model = configurable_model.with_config({
@@ -530,61 +534,65 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
         "api_key": get_api_key_for_model(configurable.compression_model, config),
         "tags": ["langsmith:nostream"]
     })
-    
+
     # Step 2: Prepare messages for compression
     researcher_messages = state.get("researcher_messages", [])
-    
-    # Add instruction to switch from research mode to compression mode
     researcher_messages.append(HumanMessage(content=compress_research_simple_human_message))
-    
-    # Step 3: Attempt compression with retry logic for token limit issues
+
+    # Step 3: Attempt compression with structured output
     synthesis_attempts = 0
     max_attempts = 3
-    
     while synthesis_attempts < max_attempts:
         try:
-            # Create system prompt focused on compression task
             compression_prompt = compress_research_system_prompt.format(date=get_today_str())
             messages = [SystemMessage(content=compression_prompt)] + researcher_messages
-            
-            # Execute compression
-            response = await synthesizer_model.ainvoke(messages)
-            
-            # Extract raw notes from all tool and AI messages
-            raw_notes_content = "\n".join([
+
+            # Bind to our new EvidenceGraphExtraction model
+            structured_model = synthesizer_model.with_structured_output(EvidenceGraphExtraction)
+            response = await structured_model.ainvoke(messages)
+
+            # Extract raw notes
+            raw_notes_content = "
+".join([
                 str(message.content) 
                 for message in filter_messages(researcher_messages, include_types=["tool", "ai"])
             ])
-            
-            # Return successful compression result
+
+            # Format nodes into readable text for the final report writer
+            readable_text = "Extracted Evidence Graph:
+
+"
+            for i, node in enumerate(response.nodes):
+                readable_text += f"Fact {i+1}: {node.claim}
+Source: {node.source_title} ({node.source_url})
+
+"
+
             return {
-                "compressed_research": str(response.content),
-                "raw_notes": [raw_notes_content]
+                "compressed_research": readable_text,
+                "raw_notes": [raw_notes_content],
+                "evidence_graph": response.nodes
             }
-            
         except Exception as e:
             synthesis_attempts += 1
-            
-            # Handle token limit exceeded by removing older messages
             if is_token_limit_exceeded(e, configurable.research_model):
                 researcher_messages = remove_up_to_last_ai_message(researcher_messages)
                 continue
-            
-            # For other errors, continue retrying
             continue
-    
+
     # Step 4: Return error result if all attempts failed
-    raw_notes_content = "\n".join([
+    raw_notes_content = "
+".join([
         str(message.content) 
         for message in filter_messages(researcher_messages, include_types=["tool", "ai"])
     ])
-    
     return {
         "compressed_research": "Error synthesizing research report: Maximum retries exceeded",
-        "raw_notes": [raw_notes_content]
+        "raw_notes": [raw_notes_content],
+        "evidence_graph": []
     }
 
-# Researcher Subgraph Construction
+Researcher Subgraph Construction
 # Creates individual researcher workflow for conducting focused research on specific topics
 researcher_builder = StateGraph(
     ResearcherState, 
@@ -716,4 +724,9 @@ deep_researcher_builder.add_edge("research_supervisor", "final_report_generation
 deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
 
 # Compile the complete deep researcher workflow
-deep_researcher = deep_researcher_builder.compile()
+# Sector 6: Local Checkpointing (Decoupled from LangSmith)
+import sqlite3
+from langgraph.checkpoint.sqlite import SqliteSaver
+conn = sqlite3.connect('omega_checkpoint.db', check_same_thread=False)
+memory = SqliteSaver(conn)
+deep_researcher = deep_researcher_builder.compile(checkpointer=memory)
