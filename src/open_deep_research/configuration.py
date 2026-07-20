@@ -14,6 +14,7 @@ class SearchAPI(Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     TAVILY = "tavily"
+    SEARXNG = "searxng"
     NONE = "none"
 
 class MCPConfig(BaseModel):
@@ -74,6 +75,16 @@ class Configuration(BaseModel):
             }
         }
     )
+    searxng_base_url: str = Field(
+         default="https://searx.be",
+         metadata={
+             "x_oap_ui_config": {
+                 "type": "text",
+                 "default": "https://searx.be",
+                 "description": "Base URL for the SearXNG instance (Free Meta-Search)."
+             }
+         }
+    )
     # Research Configuration
     search_api: SearchAPI = Field(
         default=SearchAPI.TAVILY,
@@ -84,6 +95,7 @@ class Configuration(BaseModel):
                 "description": "Search API to use for research. NOTE: Make sure your Researcher Model supports the selected search API.",
                 "options": [
                     {"label": "Tavily", "value": SearchAPI.TAVILY.value},
+                    {"label": "SearXNG (Free Meta-Search)", "value": SearchAPI.SEARXNG.value},
                     {"label": "OpenAI Native Web Search", "value": SearchAPI.OPENAI.value},
                     {"label": "Anthropic Native Web Search", "value": SearchAPI.ANTHROPIC.value},
                     {"label": "None", "value": SearchAPI.NONE.value}
