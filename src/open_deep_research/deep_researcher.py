@@ -42,6 +42,7 @@ from open_deep_research.state import (
 )
 from open_deep_research.utils import (
     check_information_satiation,
+    filter_and_verify_evidence,
     anthropic_websearch_called,
     get_all_tools,
     get_api_key_for_model,
@@ -626,7 +627,18 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         Dictionary containing the final report and cleared state
     """
     # Step 1: Extract research findings and prepare state cleanup
-    notes = state.get("notes", [])
+    # --- SECTOR 4 FIX: Epistemic Verification (Temporal Grounding) ---
+    # Filter the evidence graph to resolve temporal conflicts before writing
+    raw_evidence = state.get("evidence_graph", [])
+    verified_evidence = filter_and_verify_evidence(raw_evidence)
+    # Convert verified nodes back into readable text for the LLM
+    verified_notes = []
+    for node in verified_evidence:
+        verified_notes.append(f"Fact: {node.claim}\nSource: {node.title} ({node.url})\nDate: {node.date_published or 'Unknown'}")
+    
+    # Merge verified evidence with standard notes
+    notes = state.get("notes", []) + verified_notes
+    # ---------------------------------------------------------------
     cleared_state = {"notes": {"type": "override", "value": []}}
     findings = "\n".join(notes)
     
