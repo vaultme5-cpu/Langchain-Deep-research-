@@ -217,7 +217,7 @@ Guidelines:
 meta_learning_prompt = """Analyze this session.
 Confidence Score: {confidence_score}
 Iterations: {iterations}
-Output a single sentence starting with "LESSON:" on what strategy to use next time. If perfect, output "LESSON: Strategy optimal.""""
+Output a single sentence starting with "LESSON:" on what strategy to use next time. If perfect, output "LESSON: Strategy optimal."""
 
 summarize_webpage_prompt = """Summarize the raw content of a webpage.
 <webpage_content>
