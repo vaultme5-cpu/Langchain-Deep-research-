@@ -1,0 +1,50 @@
+name: Omega PDF Serverless Parser
+on:
+  workflow_dispatch:
+    inputs:
+      pdf_url:
+        description: 'URL of the PDF to parse'
+        required: true
+        type: string
+      request_id:
+        description: 'Unique ID for this request'
+        required: true
+        type: string
+
+jobs:
+  parse-pdf:
+    runs-on: ubuntu-latest # Gives us 7GB RAM & 2 vCPUs for free
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Docling (Heavy OCR/Layout Engine)
+        run: pip install docling
+
+      - name: Download and Parse PDF
+        run: |
+          python -c "
+          import urllib.request, sys
+          from docling.document_converter import DocumentConverter
+          url = '${{ github.event.inputs.pdf_url }}'
+          req_id = '${{ github.event.inputs.request_id }}'
+          try:
+              urllib.request.urlretrieve(url, 'temp.pdf')
+              converter = DocumentConverter()
+              result = converter.convert('temp.pdf')
+              md = result.document.export_to_markdown()
+              with open(f'{req_id}.md', 'w', encoding='utf-8') as f:
+                  f.write(md)
+          except Exception as e:
+              with open(f'{req_id}.md', 'w', encoding='utf-8') as f:
+                  f.write(f'[DOCLING ERROR]: {str(e)}')
+          "
+
+      - name: Upload Parsed Markdown Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-output-${{ github.event.inputs.request_id }}
+          path: ${{ github.event.inputs.request_id }}.md
+          retention-days: 1
