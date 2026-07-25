@@ -1,3 +1,14 @@
+import os
+import sys
+
+# Add the 'src' directory to Python's path so it can find 'open_deep_research'
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
+
+import streamlit as st
+import uuid
+from langchain_core.messages import HumanMessage
+from open_deep_research.deep_researcher import deep_researcher
+# ... rest of your imports ...
 import streamlit as st
 import uuid
 import os
