@@ -288,7 +288,7 @@ def wikipedia_rest_search(query: str) -> str:
         hits = r.get("query", {}).get("search", [])
         if not hits:
             return "No Wikipedia results found."
-        return "\n\n".join([f"TITLE: {h['title']}\nURL: https://en.wikipedia.org/wiki/{h['title'].replace(' ','_')}\nSUMMARY: {h.get('snippet','').replace('<span class=\"searchmatch\">','').replace('</span>','')}" for h in hits])
+        return "\n\n".join([f"TITLE: {h['title']}\nURL: https://en.wikipedia.org/wiki/{h['title'].replace(' ','_')}\nSUMMARY: {h.get('snippet','').replace('<span class="searchmatch">','').replace('</span>','')}" for h in hits])
     except Exception:
         return "Wikipedia search failed."
 
