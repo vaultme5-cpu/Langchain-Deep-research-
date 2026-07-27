@@ -135,7 +135,7 @@ async def write_research_brief(state: AgentState, config: RunnableConfig):
             max_researcher_iterations=configurable.max_researcher_iterations, 
             temporal_intent=getattr(response, "temporal_intent", "Current"), 
             complexity_tier="Pending", lessons_learned=mem_ctx,
-            hard_constraints=getattr(response, "hard_constraints", [])
+            hard_constraints=getattr(response, "hard_constraints", []),memory_context=mem_ctx,
         )
         return Command(goto="meta_cognitive_router", update={
             "research_brief": response.research_brief, 
@@ -162,7 +162,7 @@ async def meta_cognitive_router(state: AgentState, config: RunnableConfig):
             complexity_tier=response.complexity_tier, 
             temporal_intent=state.get("temporal_intent", "Current"), 
             lessons_learned=mem_ctx,
-            hard_constraints=state.get("hard_constraints", [])
+            hard_constraints=state.get("hard_constraints", []),memory_context=mem_ctx,
         )
         plan_dicts = [n.model_dump() for n in response.research_plan] if response.research_plan else []
         return Command(goto="research_supervisor", update={
