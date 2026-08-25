@@ -23,7 +23,7 @@ jobs:
         run: |
           python - <<'PY'
           import importlib, importlib.util, os, sys
-          sys.path.insert(0, ".")
+          sys.path.insert(0, "src")
           mods = [
               "open_deep_research.configuration",
               "open_deep_research.state",
@@ -66,7 +66,7 @@ jobs:
         run: |
           python - <<'PY'
           import sys
-          sys.path.insert(0, ".")
+          sys.path.insert(0, "src")
           from open_deep_research import deep_researcher as dr
           from open_deep_research import omega_errors as oe
           total_fail = 0
