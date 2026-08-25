@@ -7,7 +7,7 @@ on:
 jobs:
   zero-token:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -62,39 +62,65 @@ jobs:
           print("IMPORT RESULT: " + ("PASS" if fails == 0 else str(fails) + " FAILURES"))
           sys.exit(1 if fails else 0)
           PY
-      - name: Step 3 - Zero-token benchmark suites
+      - name: Step 3 - Full zero-token certification (auto-discovery)
         run: |
           python - <<'PY'
-          import sys
+          import sys, inspect, asyncio
           sys.path.insert(0, "src")
           from open_deep_research import deep_researcher as dr
           from open_deep_research import omega_errors as oe
+
+          KEYWORDS = ("benchmark", "suite", "certification", "proof", "self_test")
+          seen = set()
+          todo = []
+          skipped = []
+          for mod in (dr, oe):
+              for name in sorted(dir(mod)):
+                  if not name.startswith("_run_"):
+                      continue
+                  if not any(k in name for k in KEYWORDS):
+                      continue
+                  fn = getattr(mod, name)
+                  if not callable(fn) or id(fn) in seen:
+                      continue
+                  seen.add(id(fn))
+                  try:
+                      sig = inspect.signature(fn)
+                      req = [p.name for p in sig.parameters.values()
+                             if p.default is inspect.Parameter.empty and
+                             p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                        inspect.Parameter.POSITIONAL_ONLY,
+                                        inspect.Parameter.KEYWORD_ONLY)]
+                  except (TypeError, ValueError):
+                      req = ["?"]
+                  if req:
+                      skipped.append(name + " (needs args: " + ",".join(req) + ")")
+                      continue
+                  todo.append((name, fn))
+
           total_fail = 0
-          def run(name, fn):
-              global total_fail
+          total_pass = 0
+          for name, fn in todo:
               try:
-                  r = fn()
-                  ok = bool(r.get("success", False))
-                  print(("PASS " if ok else "FAIL ") + name +
-                        " | passed=" + str(r.get("passed", 0)) +
-                        " failed=" + str(r.get("failed", 0)))
-                  for d in (r.get("details", []) or [])[:10]:
-                      print("   " + str(d))
-                  if not ok:
-                      total_fail += 1
+                  if inspect.iscoroutinefunction(fn):
+                      r = asyncio.run(fn())
+                  else:
+                      r = fn()
+                  ok = bool(r.get("success", False)) if isinstance(r, dict) else False
+                  p = r.get("passed", 0) if isinstance(r, dict) else 0
+                  f = r.get("failed", 0) if isinstance(r, dict) else 0
+                  total_pass += int(p)
+                  total_fail += (0 if ok else 1)
+                  print(("PASS " if ok else "FAIL ") + name + " | passed=" + str(p) + " failed=" + str(f))
+                  if not ok and isinstance(r, dict):
+                      for d in (r.get("details", []) or [])[:15]:
+                          print("   " + str(d))
               except Exception as e:
                   total_fail += 1
                   print("CRASH " + name + " -> " + type(e).__name__ + ": " + str(e)[:300])
-          run("omega_errors_self_test", oe._run_omega_errors_self_test)
-          for name in ["_run_phase_e_benchmark", "_run_phase_f_benchmark",
-                       "_run_phase_g_benchmark", "_run_dag_benchmark",
-                       "_run_phase_h_benchmark"]:
-              fn = getattr(dr, name, None)
-              if fn is None:
-                  print("MISSING " + name)
-                  total_fail += 1
-              else:
-                  run(name, fn)
-          print("SUITE RESULT: " + ("PASS" if total_fail == 0 else str(total_fail) + " SUITE FAILURES"))
+
+          print("SKIPPED (need args): " + ("; ".join(skipped) if skipped else "none"))
+          print("SUITES RUN: " + str(len(todo)) + " | CHECKS PASSED: " + str(total_pass) + " | SUITE FAILURES: " + str(total_fail))
+          print("CERTIFICATION RESULT: " + ("PASS" if total_fail == 0 else "FAIL"))
           sys.exit(1 if total_fail else 0)
           PY
