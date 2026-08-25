@@ -1,0 +1,100 @@
+name: Omega Zero-Token CI
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  zero-token:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Step 1 - Syntax check
+        run: python -m compileall -q .
+      - name: Step 2 - Import check (zero tokens)
+        run: |
+          python - <<'PY'
+          import importlib, importlib.util, os, sys
+          sys.path.insert(0, ".")
+          mods = [
+              "open_deep_research.configuration",
+              "open_deep_research.state",
+              "open_deep_research.prompts",
+              "open_deep_research.omega_errors",
+              "open_deep_research.omega_verification",
+              "open_deep_research.omega_reporting",
+              "open_deep_research.omega_security",
+              "open_deep_research.utils",
+              "open_deep_research.deep_researcher",
+          ]
+          fails = 0
+          for m in mods:
+              try:
+                  importlib.import_module(m)
+                  print("OK   " + m)
+              except Exception as e:
+                  fails += 1
+                  print("FAIL " + m + " -> " + type(e).__name__ + ": " + str(e)[:300])
+          ui = None
+          for root, _, files in os.walk("."):
+              if "omega_ui.py" in files:
+                  ui = os.path.join(root, "omega_ui.py")
+                  break
+          if ui is None:
+              print("WARN omega_ui.py not found")
+          else:
+              try:
+                  spec = importlib.util.spec_from_file_location("omega_ui", ui)
+                  mod = importlib.util.module_from_spec(spec)
+                  spec.loader.exec_module(mod)
+                  print("OK   omega_ui (" + ui + ")")
+              except Exception as e:
+                  fails += 1
+                  print("FAIL omega_ui -> " + type(e).__name__ + ": " + str(e)[:300])
+          print("IMPORT RESULT: " + ("PASS" if fails == 0 else str(fails) + " FAILURES"))
+          sys.exit(1 if fails else 0)
+          PY
+      - name: Step 3 - Zero-token benchmark suites
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          from open_deep_research import deep_researcher as dr
+          from open_deep_research import omega_errors as oe
+          total_fail = 0
+          def run(name, fn):
+              global total_fail
+              try:
+                  r = fn()
+                  ok = bool(r.get("success", False))
+                  print(("PASS " if ok else "FAIL ") + name +
+                        " | passed=" + str(r.get("passed", 0)) +
+                        " failed=" + str(r.get("failed", 0)))
+                  for d in (r.get("details", []) or [])[:10]:
+                      print("   " + str(d))
+                  if not ok:
+                      total_fail += 1
+              except Exception as e:
+                  total_fail += 1
+                  print("CRASH " + name + " -> " + type(e).__name__ + ": " + str(e)[:300])
+          run("omega_errors_self_test", oe._run_omega_errors_self_test)
+          for name in ["_run_phase_e_benchmark", "_run_phase_f_benchmark",
+                       "_run_phase_g_benchmark", "_run_dag_benchmark",
+                       "_run_phase_h_benchmark"]:
+              fn = getattr(dr, name, None)
+              if fn is None:
+                  print("MISSING " + name)
+                  total_fail += 1
+              else:
+                  run(name, fn)
+          print("SUITE RESULT: " + ("PASS" if total_fail == 0 else str(total_fail) + " SUITE FAILURES"))
+          sys.exit(1 if total_fail else 0)
+          PY
